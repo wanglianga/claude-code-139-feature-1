@@ -17,6 +17,7 @@ export const PRICING = {
   chargerPricePerKwh: 1.2, // 充电服务费 元/kWh
   platformFaultCoupon: 15, // 平台/物业责任的补偿券（计入异常补偿）
   minBillableMinutes: 30, // 最低计费时长（被异常打断不足此时长按此时长或全额免单，由裁决决定）
+  relocationCashCompensation: 10, // 业主提前回家换位场景，向车主支付的换位补偿（业主承担）
 };
 
 export type Ruling =
@@ -37,7 +38,8 @@ export interface IncidentInput {
     | 'weak_signal'
     | 'ice_occupy_charger'
     | 'wrong_parking'
-    | 'manual_release';
+    | 'manual_release'
+    | 'owner_preempt'; // 业主提前回家抢占（计费影响经 PriceInput.relocation 传入，工单本身不截断计费）
   started_at?: Date | null;
   resolved_at?: Date | null;
   detail?: Record<string, any>;
@@ -63,6 +65,13 @@ export interface PriceInput {
   ruling?: Ruling | null;
   couponAmount?: number;
   prepaid: number;
+  // 业主提前回家抢占-换位：预约已迁移到替代车位。
+  // 计费对车主保持原车位价格（原价更优惠时业主承担差价），并向车主支付换位现金补偿。
+  relocation?: {
+    cashCompensation: number; // 业主承担的换位现金补偿
+    originalHourlyRate?: number | null; // 换位前车位单价（计费锚定原价）
+    originalOvernightCap?: number | null; // 换位前夜间封顶价
+  } | null;
 }
 
 export interface LedgerDraft {
@@ -122,15 +131,26 @@ export function settlePrice(input: PriceInput): SettlementBreakdown {
   let durationMinutes = minutes(usableFrom, billableEnd);
 
   // ---- 基础停车费（跨夜封顶）----
-  // 服务未实际交付（平台/物业/陌生车责任）时免收停车费；业主违约时按实际可用时长照实计费
+  // 服务未实际交付（平台/物业/陌生车责任）时免收停车费；业主违约时按实际可用时长照实计费。
+  // 换位场景：预约已迁至替代车位，计费锚定原车位价格（车主不因换位承担价差）。
+  const hourlyRate = input.relocation?.originalHourlyRate ?? input.hourlyRate;
+  const overnightCap =
+    input.relocation && input.relocation.originalOvernightCap !== undefined
+      ? input.relocation.originalOvernightCap
+      : input.overnightCap;
+  if (input.relocation) {
+    notes.push(
+      `业主提前回家，本单已换位至替代车位：计费按原车位价格 ${hourlyRate} 元/时${overnightCap ? `（封顶 ¥${overnightCap}）` : ''} 结算`,
+    );
+  }
   const feeWaived = ['platform_fault', 'property_fault', 'stranger'].includes(ruling ?? '');
   let baseFee = 0;
   if (ruling === 'no_fault' || !feeWaived) {
     const hours = durationMinutes / 60;
-    baseFee = round2(hours * input.hourlyRate);
-    if (input.overnightCap && baseFee > input.overnightCap) {
-      baseFee = input.overnightCap;
-      notes.push(`夜间封顶价 ¥${input.overnightCap} 生效`);
+    baseFee = round2(hours * hourlyRate);
+    if (overnightCap && baseFee > overnightCap) {
+      baseFee = overnightCap;
+      notes.push(`夜间封顶价 ¥${overnightCap} 生效`);
     }
   }
 
@@ -155,7 +175,7 @@ export function settlePrice(input: PriceInput): SettlementBreakdown {
       input.actualExit,
     );
     if (overMin > 0) {
-      overtimeFee = round2(((overMin / 60) * input.hourlyRate * PRICING.overtimeMultiplier));
+      overtimeFee = round2(((overMin / 60) * hourlyRate * PRICING.overtimeMultiplier));
       notes.push(`超时 ${Math.round(overMin)} 分钟，按 ${PRICING.overtimeMultiplier}× 计费`);
     }
   }
@@ -181,6 +201,12 @@ export function settlePrice(input: PriceInput): SettlementBreakdown {
   if (ruling === 'owner_fault' || ownerReturn) {
     cashCompensation += PRICING.ownerReturnCompensation;
     notes.push(`业主临时回家违约，现金补偿车主 ¥${PRICING.ownerReturnCompensation}`);
+  }
+  // 换位场景：业主妥善安排替代车位，向车主支付换位现金补偿（不中断服务，不按违约截断计费）
+  const relocationCash = round2(input.relocation?.cashCompensation ?? 0);
+  if (relocationCash > 0) {
+    cashCompensation += relocationCash;
+    notes.push(`业主提前回家换位安排，现金补偿车主 ¥${relocationCash}（换位不便补偿）`);
   }
   if (ruling === 'platform_fault' || input.incidents.some((i) => i.type === 'weak_signal')) {
     couponCompensation += PRICING.platformFaultCoupon;
@@ -214,8 +240,11 @@ export function settlePrice(input: PriceInput): SettlementBreakdown {
   const platformServiceEarn = round2(serviceRevenue - ownerShareEarn - propertyFee);
   const fineResidual = round2(Math.max(0, wrongParkFine - ownerCompensation));
 
-  // 业主在"业主回家"场景需要向车主支付的补偿，先从其分成中扣减，不足部分平台垫付
-  const ownerPaysComp = ruling === 'owner_fault' || ownerReturn ? PRICING.ownerReturnCompensation : 0;
+  // 业主在"业主回家"场景需要向车主支付的补偿，先从其分成中扣减，不足部分平台垫付；
+  // 换位场景的换位补偿同样由业主承担
+  const ownerPaysComp = round2(
+    (ruling === 'owner_fault' || ownerReturn ? PRICING.ownerReturnCompensation : 0) + relocationCash,
+  );
   if (ownerPaysComp > 0) {
     notes.push(
       `业主承担车主补偿 ¥${ownerPaysComp}：优先从业主分成 ¥${ownerShareEarn} 中扣除，不足部分平台垫付并保留追缴权`,

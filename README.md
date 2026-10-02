@@ -4,6 +4,12 @@
 平台把**车位发布 → 预约 → 入场道闸车牌识别 → 导航引导 → 异常调度 → 离场结算 → 收益分账**绑定到同一笔停车服务，
 并以六类证据链对错停申诉自动给出责任建议、支持人工终裁与分账重算，供业主、车主、物业三方共同追溯。
 
+本次新增：**业主提前回家抢占处理**——业主共享到 23:00 却 22:00 临时回家时，平台先评估
+**当前预约车辆是否已入场、剩余停车时长、附近可替代车位、业主历史提前结束次数**；
+可替换时外来车主收到**换位导航 + 费用补偿**（现金 + 平台券，计费锚定原车位价格）；
+无法替换时业主可选择**等待、支付违约补偿收回或申请物业协调**；
+每次提前结束都**写入业主发布记录**，后续开放时段审核会更谨慎。
+
 - **前端**：React 18 + TypeScript + Vite（业主 / 车主 / 物业 / 平台管理员四个角色工作台）
 - **后端**：NestJS 10 + TypeScript（JWT 鉴权、角色守卫、纯函数领域引擎）
 - **数据库**：PostgreSQL 15（事务、JSONB 事件档案、全链路 `service_events` 事件流）
@@ -75,7 +81,7 @@ npm run dev
 
 | 用户名 | 角色 | 姓名 | 典型用途 |
 | --- | --- | --- | --- |
-| `owner1` | 业主 | 王业主 | 发布产权车位、设置共享时段/充电桩/月租优先、临时回家上报 |
+| `owner1` | 业主 | 王业主 | 发布产权车位、设置共享时段/充电桩/月租优先、**提前回家抢占处理**（评估/换位/等待/违约/协调） |
 | `owner2` | 业主 | 李业主 | 第二个业主（含禁访客车位、待审核车位） |
 | `driver1` | 外来车主 | 陈车主 | 新能源**月租车** `沪AD88899`，预约充电位、申诉、领券 |
 | `driver2` | 外来车主 | 赵访客 | **访客车** `沪A12345`，访客超时/错停场景 |
@@ -109,6 +115,19 @@ npm run dev
 - 物业可派发挪车通知（App 推送 + 车位 LED）、登记超时豁免、处置工单。
 - 夜巡登记（陌生车/错停/燃油车占位）自动开工单，照片进入申诉证据链。
 
+### 业主提前回家抢占处理（业主 / 车主 / 物业）
+业主共享到 23:00 却 22:00 临时回家时，在"夜间调度"一键上报，平台即时生成**抢占评估报告**：
+- **四维评估**（`src/domain/preemption.ts` 纯函数）：当前预约车辆**是否已入场**、**剩余停车时长**、
+  **附近可替代车位**（同小区已上架、共享窗覆盖剩余时段、充电/访客属性兼容、时段无冲突）、
+  **业主历史提前结束次数**（抢占处理单 + 历史回家工单，去重统计）。
+- **可替换**：业主选定替代车位后，预约整体迁移，车主 App/LED 收到**换位导航**，
+  并获得**费用补偿**（现金 ¥10 业主承担 + 平台券 ¥5）；离场结算**锚定原车位价格**，服务不截断、不扣信用。
+- **无法替换**：业主三选一——**等待**车主离场（可随时改判）、**支付违约补偿收回**
+  （复用业主回家违约链路：按实际时长计费 + 现金补偿 ¥20 + 信用 -5，证据链自动归责）、
+  **申请物业协调**（物业调度看板处置：协调车主继续停，或判定业主收回并自动转入违约结算）。
+- **写入发布记录**：每次提前结束落库 `preemption_cases`，车位档案与物业审核队列均展示提前结束次数；
+  次数 ≥2 时审核队列给出**谨慎审核提示**，业主再次发布时也提示"后续开放时段审核将更谨慎"。
+
 ### 错停申诉与证据链裁决（车主发起 / 物业终裁）
 自动汇聚六类证据：**车牌识别记录、预约记录、现场照片、道闸日志、业主回家时间、物业巡查记录**（另含车主陈述、信号记录）。
 领域引擎 `adjudication.ts` 按证据来源权重与指向输出：
@@ -136,7 +155,7 @@ npm run dev
 
 ## 五、本题的验证方式与结果（均已实际执行）
 
-### 后端单元测试（Jest，19 个用例全部通过）
+### 后端单元测试（Jest，30 个用例全部通过）
 ```bash
 cd backend && npm test
 ```
@@ -146,8 +165,11 @@ cd backend && npm test
 - `test/adjudication.spec.ts`（6 个）：车主错停、业主回家责任、陌生车+人工放行、识别失败+信号差平台责任、
   证据不足不作自动处罚、证据时间线排序。
 - `test/timeline.spec.ts`（3 个）：一晚相邻两单归属、陌生车占用段平台兜底/追缴归责、业主回家段业主自用与担责。
+- `test/preemption.spec.ts`（11 个）：抢占评估（无预约直接收回/可替换建议换位/剩余不足 30 分钟建议等待/
+  无替代建议违约收回/历史超阈值建议物业协调/审核谨慎阈值）、换位分账（计费锚定原价、换位补偿由业主分成承担、
+  补偿超分成时平台垫付、服务不截断不扣信用，四种情形借贷均平衡）。
 
-### 真实数据库 + HTTP 端到端冒烟（53 项断言全部通过）
+### 真实数据库 + HTTP 端到端冒烟（92 项断言全部通过，重复执行亦通过）
 对运行中的 NestJS（真实 PostgreSQL）执行 `node backend/seed/smoke.mjs`，用道闸时钟参数把事件锚定到"今晚"时间线，端到端覆盖：
 
 1. 四角色登录、业主发布 4 个车位、物业审核、车主按充电桩筛选；
@@ -160,9 +182,22 @@ cd backend && npm test
    **终裁后重算分账借贷仍平衡**、业主信用 -5；
 6. 订单 D：夜巡发现陌生车占用充电位 → 时间轴标注占用段（预约车主不计费/平台兜底/向陌生车主追缴）→
    判陌生车责任 → 服务费全免、平台垫付车主 20+业主 30、不影响预约车主信用；
-7. 共同追溯：全账户资金流水（含托管账户/券池）、调度总览、单订单全链路事件、六类证据档案、巡查照片留档。
+7. **抢占-不可替换（车位 F）**：锁死全部充电替代位后业主 22:30 提前回家 → 评估"已入场/剩余 90 分钟/无替代/
+   历史次数" → 业主先**等待**再改**违约补偿收回** → 挪车工单+证据链判业主责任 → 按 150 分钟计费、
+   补偿 20 元随退款 27.5 元发放、业主信用 -5、借贷平衡；
+8. **抢占-可替换（车位 E）**：评估找到替代车位（含更贵的 6 元位）→ 业主确认换位 → 预约迁移、
+   **换位导航通知送达（App+LED）**、现金 10+券 5 补偿到账 → 离场**锚定原车位 5 元价计费 20 元**、
+   业主分成 14-10=4、服务 240 分钟不截断、借贷平衡；
+9. **抢占-物业协调（车位 G）**：业主申请物业协调 → 物业调度看板处置"车主继续停" → 正常计费无补偿；
+10. **发布记录与谨慎审核**：业主历史提前结束累计 4 次 → 新发布车位在物业审核队列显示次数与
+    **谨慎审核提示**、车位档案逐车位计数、全部抢占单三方可追溯；
+11. 共同追溯：全账户资金流水（含托管账户/券池）、调度总览、单订单全链路事件、六类证据档案、巡查照片留档。
 
-最近一次执行输出：`RESULT: 53 passed, 0 failed` / `SMOKE_OK`。
+最近一次执行输出：`RESULT: 92 passed, 0 failed` / `SMOKE_OK`（同一数据库重复执行第二次同为 `92 passed, 0 failed`）。
+
+> 冒烟脚本对历史数据健壮（相对基数断言、占位锁替代位），但为获得完全一致的断言时序，
+> 建议在干净数据库上运行：`docker compose down -v && docker compose up --build` 后执行，
+> 或本地 `dropdb parking && createdb parking && npm run seed` 后执行。
 
 ### 前端验证
 - `cd frontend && npm run build`：TypeScript 类型检查 + Vite 生产构建通过（40 个模块）；
@@ -184,6 +219,7 @@ cd backend && npm test
 | 道闸·导航 | `POST /operations/gate/recognize` `POST /operations/gate/admit` `POST /operations/navigation/guidance` `POST /operations/reservations/:id/parked` `POST /operations/reservations/:id/report-signal` | 物业/车主 |
 | 巡查 | `GET/POST /operations/patrol` | 物业 |
 | 调度 | `GET /dispatch/incidents` `POST /dispatch/owner-return` `POST /dispatch/overstay` `POST /dispatch/incidents/:id/notify` `POST /dispatch/incidents/:id/resolve` `GET /dispatch/overview` | 业主/物业 |
+| 提前回家抢占 | `POST /dispatch/preempt` `GET /dispatch/preempt` `GET /dispatch/preempt/:id` `POST /dispatch/preempt/:id/relocate` `POST /dispatch/preempt/:id/choose` `POST /dispatch/preempt/:id/resolve` `POST /dispatch/preempt/:id/cancel` | 业主/物业/车主 |
 | 申诉 | `POST /appeals` `GET /appeals` `GET /appeals/:id` `POST /appeals/:id/evidence` `POST /appeals/:id/rule` `POST /appeals/:id/resettle` | 车主/物业 |
 | 分账 | `POST /reservations/:id/exit` `GET /reservations/:id/quote` `GET /reservations/:id/settlement` `GET /ledger` `GET /spots/:id/timeline` | 按角色 |
 
@@ -197,11 +233,11 @@ cd backend && npm test
 ├── docker-compose.yml          # 一键启动 db + backend + frontend
 ├── backend/
 │   ├── src/
-│   │   ├── domain/             # pricing 计费分账 / adjudication 证据裁决 / timeline 时间轴 / availability 时段
-│   │   ├── database/           # pg 连接池 + schema.sql（15 张表）
-│   │   ├── auth/ spots/ reservations/ operations/ dispatch/ appeals/ settlement/
-│   ├── test/                   # 19 个 Jest 单元测试
-│   └── seed/seed.js + smoke.mjs  # 种子数据 + 53 项端到端冒烟
+│   │   ├── domain/             # pricing 计费分账 / adjudication 证据裁决 / timeline 时间轴 / availability 时段 / preemption 抢占评估
+│   │   ├── database/           # pg 连接池 + schema.sql（16 张表，含 preemption_cases）
+│   │   ├── auth/ spots/ reservations/ operations/ dispatch/ preemption/ appeals/ settlement/
+│   ├── test/                   # 30 个 Jest 单元测试
+│   └── seed/seed.js + smoke.mjs  # 种子数据 + 92 项端到端冒烟
 └── frontend/
     └── src/
         ├── App.tsx             # 登录 + 四角色路由

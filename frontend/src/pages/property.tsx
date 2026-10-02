@@ -3,7 +3,7 @@ import { api } from '../api';
 import { useLoader } from '../hooks';
 import { WorkspaceShell } from '../App';
 import { dt, INCIDENT_LABEL, Tag } from '../ui';
-import { OrderTable } from './owner';
+import { OrderTable, PreemptionCard } from './owner';
 import { AppealDetailModal, ReservationDetailModal } from './shared';
 
 type Session = any;
@@ -67,10 +67,16 @@ function ReviewTab() {
             <div className="ticket-desc">
               {s.location_desc} · {s.hourly_rate} 元/时{s.overnight_cap ? ` · 封顶 ${s.overnight_cap}` : ''} · {dt(s.created_at)} 提交
             </div>
+            {s.review_hint && (
+              <div className={`alert ${s.review_caution ? 'error' : 'info'}`} style={{ marginTop: 8 }}>
+                ⚠️ {s.review_hint}
+              </div>
+            )}
             <div className="spot-tags">
               {s.near_charger && <Tag cls="green" label={`⚡ 充电桩 ${s.charger_power_kw ?? ''}kW`} />}
               {s.allow_visitor ? <Tag cls="blue" label="允许访客" /> : <Tag cls="gray" label="禁访客" />}
               {s.monthly_priority && <Tag cls="purple" label="月租优先" />}
+              {Number(s.owner_early_return_count) > 0 && <Tag cls={s.review_caution ? 'red' : 'amber'} label={`业主提前结束 ${s.owner_early_return_count} 次`} />}
             </div>
             <div className="btn-row" style={{ marginTop: 8 }}>
               <input style={{ maxWidth: 360 }} placeholder="审核备注（产权材料 / 现场核验）"
@@ -178,6 +184,7 @@ function DispatchTab() {
   const [status, setStatus] = useState('');
   const { data: tickets, reload } = useLoader<any[]>(`/dispatch/incidents${status ? `?status=${status}` : ''}`);
   const { data: overview } = useLoader<any>('/dispatch/overview');
+  const { data: preemptions, reload: reloadPreempt } = useLoader<any[]>('/dispatch/preempt?status=awaiting_owner_choice,relocatable,waiting,property_coordination');
   const [openNotices, setOpenNotices] = useState<any | null>(null);
   const [msg, setMsg] = useState('');
 
@@ -222,6 +229,16 @@ function DispatchTab() {
             </div>
           );
         })}
+      </div>
+      <div className="card">
+        <h3>业主提前回家抢占协调 <span className="hint">{preemptions?.length ?? 0} 单进行中</span></h3>
+        {(preemptions ?? []).length === 0 && <div className="empty">当前没有进行中的抢占处理</div>}
+        {(preemptions ?? []).map((c) => (
+          <PreemptionCard key={c.id} item={c} role="property" onRefresh={() => { reloadPreempt(); reload(); }} />
+        ))}
+        <div className="small muted" style={{ marginTop: 6 }}>
+          物业协调中：可现场协调车主继续停至预约结束，或判定业主收回车位（按违约补偿车主，结算自动扣减业主分成）。
+        </div>
       </div>
       <div className="card">
         <div className="filter-bar">

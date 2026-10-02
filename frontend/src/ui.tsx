@@ -36,6 +36,15 @@ export const STATUS_TAG: Record<string, { label: string; cls: string }> = {
   resolved: { label: '已解决', cls: 'green' },
   closed: { label: '已关闭', cls: 'gray' },
 
+  // 业主提前回家抢占处理单状态
+  assessing: { label: '评估中', cls: 'cyan' },
+  relocatable: { label: '可换位', cls: 'green' },
+  awaiting_owner_choice: { label: '待业主抉择', cls: 'amber' },
+  waiting: { label: '业主等待中', cls: 'cyan' },
+  relocated: { label: '已换位', cls: 'green' },
+  breach_settled: { label: '违约收回', cls: 'red' },
+  property_coordination: { label: '物业协调中', cls: 'purple' },
+
   investigating: { label: '核查中', cls: 'cyan' },
   upheld: { label: '申诉成立', cls: 'green' },
   rejected_appeal: { label: '申诉驳回', cls: 'red' },
@@ -63,6 +72,7 @@ export const INCIDENT_LABEL: Record<string, string> = {
   ice_occupy_charger: '燃油车占充电位',
   wrong_parking: '车主停错车位',
   manual_release: '物业人工放行',
+  owner_preempt: '业主提前回家抢占',
 };
 
 export const EVIDENCE_LABEL: Record<string, string> = {

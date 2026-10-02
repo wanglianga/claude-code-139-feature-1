@@ -352,6 +352,22 @@ export class SettlementController {
       kwh = Number(detail.rows[0]?.detail?.kwh ?? 0);
     }
 
+    // 业主提前回家抢占-换位：预约已迁至替代车位，计费锚定原车位价格，车主获换位现金补偿（业主承担）
+    const pq = await client.query(
+      `SELECT compensation_amount, assessment FROM preemption_cases
+       WHERE reservation_id=$1 AND status='relocated' ORDER BY id DESC LIMIT 1`,
+      [r.id],
+    );
+    const relocation = pq.rows[0]
+      ? {
+          cashCompensation: Number(pq.rows[0].compensation_amount ?? 0),
+          originalHourlyRate:
+            pq.rows[0].assessment?.original_hourly_rate != null ? Number(pq.rows[0].assessment.original_hourly_rate) : null,
+          originalOvernightCap:
+            pq.rows[0].assessment?.original_overnight_cap != null ? Number(pq.rows[0].assessment.original_overnight_cap) : null,
+        }
+      : null;
+
     return settlePrice({
       reservedStart: r.start_at,
       reservedEnd: r.end_at,
@@ -366,6 +382,7 @@ export class SettlementController {
       ruling,
       couponAmount,
       prepaid: Number(r.estimated_fee && couponAmount ? Math.max(0, Number(r.estimated_fee) - couponAmount) : (r.estimated_fee ?? 0)),
+      relocation,
     });
   }
 

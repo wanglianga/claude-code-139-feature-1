@@ -81,8 +81,8 @@ function SpotsTab({ session }: { session: Session }) {
   const submit = async () => {
     setErr(''); setMsg(''); setPublishing(true);
     try {
-      await api('POST', '/spots', form);
-      setMsg('车位已提交，等待物业审核产权材料');
+      const r = await api('POST', '/spots', form);
+      setMsg(`车位已提交，等待物业审核产权材料${r?.publish_hint ? `。注意：${r.publish_hint}` : ''}`);
       set('code', '');
       reload();
     } catch (e: any) {
@@ -187,6 +187,7 @@ function SpotsTab({ session }: { session: Session }) {
                   {s.monthly_priority && <Tag cls="purple" label="月租优先" />}
                   <Tag cls="gray" label={`${s.hourly_rate} 元/时`} />
                   {s.overnight_cap && <Tag cls="amber" label={`封顶 ${s.overnight_cap}`} />}
+                  {Number(s.early_return_count) > 0 && <Tag cls="red" label={`提前结束 ${s.early_return_count} 次`} />}
                 </div>
                 <div className="small muted" style={{ marginBottom: 8 }}>
                   共享：{(s.windows ?? []).map((w: any) => `周${'日一二三四五六'[w.weekday]} ${String(w.start_time).slice(0, 5)}-${String(w.end_time).slice(0, 5)}`).join('，')}
@@ -294,7 +295,7 @@ export function OrderTable({ orders, onOpen }: { orders: any[]; onOpen: (id: num
               <td>{r.spot_code}</td>
               <td>{r.driver_name}<div className="small muted mono">{r.plate}</div></td>
               <td className="small">{dt(r.start_at)}<br />~ {dt(r.end_at)}</td>
-              <td><Tag status={r.status} />{r.priority === 'monthly' && <div style={{ marginTop: 4 }}><Tag cls="purple" label="月租" /></div>}</td>
+              <td><Tag status={r.status} />{r.priority === 'monthly' && <div style={{ marginTop: 4 }}><Tag cls="purple" label="月租" /></div>}{r.relocated && <div style={{ marginTop: 4 }}><Tag cls="green" label="已换位" /></div>}</td>
               <td className="money small">{money(r.estimated_fee)}</td>
               <td className="money">{r.status === 'completed' ? money(r.estimated_fee) : '—'}</td>
               <td><button className="btn sm gray" onClick={(e) => { e.stopPropagation(); onOpen(r.id); }}>追溯</button></td>
@@ -306,44 +307,103 @@ export function OrderTable({ orders, onOpen }: { orders: any[]; onOpen: (id: num
   );
 }
 
-// ---------- 夜间调度（业主视角）----------
+// ---------- 夜间调度（业主视角：提前回家抢占处理）----------
 function DispatchTab({ session }: { session: Session }) {
   const { data: spots } = useLoader<any[]>('/spots/mine');
-  const { data: tickets, reload } = useLoader<any[]>('/dispatch/incidents');
+  const { data: cases, reload } = useLoader<any[]>('/dispatch/preempt');
+  const { data: tickets, reload: reloadTickets } = useLoader<any[]>('/dispatch/incidents');
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
+  const [active, setActive] = useState<any>(null); // 评估报告 + 处理单
 
   const reportReturn = async (spotId: number) => {
     setErr(''); setMsg('');
     const eta = prompt('预计多少分钟后到家？', '30');
     if (eta === null) return;
     try {
-      const r = await api('POST', '/dispatch/owner-return', { spot_id: spotId, eta_minutes: Number(eta), note: '业主临时回家' });
-      setMsg(`已为该车位在场车主发送挪车通知（工单 ${r.ticket.code}），平台将按其实际使用时长结算并补偿`);
-      reload();
+      const r = await api('POST', '/dispatch/preempt', { spot_id: spotId, eta_minutes: Number(eta), note: '业主临时提前回家' });
+      setActive(r);
+      if (r.assessment) setMsg('平台已完成抢占评估，请根据建议选择处置方式');
+      else setMsg(r.case?.resolution ?? '已收回车位');
+      reload(); reloadTickets();
     } catch (e: any) {
       setErr(e.message);
     }
   };
 
+  const act = async (fn: () => Promise<any>, okMsg: string) => {
+    setErr(''); setMsg('');
+    try {
+      const r = await fn();
+      setMsg(okMsg);
+      setActive(null);
+      reload(); reloadTickets();
+      return r;
+    } catch (e: any) {
+      setErr(e.message);
+      return null;
+    }
+  };
+
+  const openCases = (cases ?? []).filter((c) => ['assessing', 'relocatable', 'awaiting_owner_choice', 'waiting', 'property_coordination'].includes(c.status));
+  const historyCases = (cases ?? []).filter((c) => !openCases.includes(c));
+
   return (
     <div>
-      <PageHead title="夜间调度" desc="临时回家时一键触发挪车协调；查看自家车位相关异常工单与处置进度" />
+      <PageHead title="夜间调度 · 提前回家抢占处理" desc="临时提前回家时，平台先评估在场车辆/剩余时长/替代车位/历史记录，再安排换位或协商收回；每次提前结束都会写入发布记录" />
       {msg && <div className="alert ok">{msg}</div>}
       {err && <div className="alert error">{err}</div>}
+
       <div className="card">
-        <h3>我要临时回家（收回共享车位）</h3>
+        <h3>我要提前回家（收回共享车位）</h3>
         <div className="btn-row">
           {(spots ?? []).filter((s) => s.review_status === 'approved').map((s) => (
             <button key={s.id} className="btn ghost" onClick={() => reportReturn(s.id)}>
-              🏠 {s.code} 业主回家
+              🏠 {s.code} 提前回家
+              {Number(s.early_return_count) > 0 && <span className="tag amber" style={{ marginLeft: 6 }}>历史提前结束 {s.early_return_count}</span>}
             </button>
           ))}
         </div>
         <div className="small muted" style={{ marginTop: 8 }}>
-          触发后：通知在场车主挪车 → 订单按实际可用时长结算 → 业主向车主支付现金补偿（从分成中扣减，不足平台垫付）→ 业主信用 -5（恶意频繁触发时）
+          处理规则：平台先评估（车辆是否入场 / 剩余停车时长 / 附近可替代车位 / 您的历史提前结束次数）→
+          可替换时为车主安排换位导航并发放费用补偿；无法替换时您可选择等待、支付违约补偿收回或申请物业协调。
+          提前结束记录将写入发布档案，次数偏多时后续开放时段审核会更谨慎。
         </div>
       </div>
+
+      {active?.assessment && <AssessmentPanel result={active} onAction={(fn, m) => act(fn, m)} onClose={() => setActive(null)} />}
+
+      {openCases.length > 0 && !active && (
+        <div className="card">
+          <h3>进行中的抢占处理 <span className="hint">{openCases.length} 单</span></h3>
+          {openCases.map((c) => (
+            <PreemptionCard key={c.id} item={c} role="owner" onRefresh={() => { reload(); reloadTickets(); }} />
+          ))}
+        </div>
+      )}
+
+      <div className="card">
+        <h3>提前结束记录（写入发布档案）</h3>
+        {historyCases.length === 0 && <div className="empty">暂无提前结束记录</div>}
+        {historyCases.map((c) => (
+          <div key={c.id} className={`ticket-card ${c.status === 'breach_settled' ? 'open' : 'resolved'}`}>
+            <div className="ticket-head">
+              <span className="ticket-title">{c.spot_code} · {ACTION_LABEL[c.chosen_action] ?? '提前回家'}</span>
+              <Tag status={c.status} />
+            </div>
+            <div className="ticket-desc">
+              {c.resolution ?? '—'}
+              {Number(c.compensation_amount) > 0 && ` · 现金补偿 ${money(c.compensation_amount)}`}
+              {Number(c.coupon_compensation) > 0 && ` · 平台券 ${money(c.coupon_compensation)}`}
+            </div>
+            <div className="small muted">
+              {dt(c.occurred_at)} 上报{c.reservation_code ? ` · 关联订单 ${c.reservation_code}` : ''}
+              {c.alternative_spot_code ? ` · 换位至 ${c.alternative_spot_code}` : ''} · 单号 {c.code}
+            </div>
+          </div>
+        ))}
+      </div>
+
       <div className="card">
         <h3>我车位上的异常工单</h3>
         {(tickets ?? []).length === 0 && <div className="empty">暂无异常</div>}
@@ -358,6 +418,125 @@ function DispatchTab({ session }: { session: Session }) {
             <div className="small muted">{dt(t.created_at)}{t.reservation_code ? ` · 关联订单 ${t.reservation_code}` : ''}</div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+const ACTION_LABEL: Record<string, string> = {
+  relocate: '换位安排',
+  wait: '等待车主离场',
+  breach_compensation: '违约补偿收回',
+  property_coordination: '物业协调',
+};
+
+// 评估报告 + 处置操作面板（业主）
+function AssessmentPanel({ result, onAction, onClose }: { result: any; onAction: (fn: () => Promise<any>, okMsg: string) => any; onClose: () => void }) {
+  const a = result.assessment;
+  const pcase = result.case;
+  const [altId, setAltId] = useState<number | ''>(a?.alternatives?.[0]?.id ?? '');
+  if (!a || !pcase) return null;
+
+  const relocate = () => onAction(
+    () => api('POST', `/dispatch/preempt/${pcase.id}/relocate`, { alternative_spot_id: altId }),
+    '已通知车主换位：换位导航与费用补偿已发放，车位已收回',
+  );
+  const choose = (action: string, okMsg: string) => onAction(
+    () => api('POST', `/dispatch/preempt/${pcase.id}/choose`, { action }),
+    okMsg,
+  );
+
+  return (
+    <div className="card" style={{ border: '1px solid var(--amber, #b76b00)' }}>
+      <div className="btn-row" style={{ justifyContent: 'space-between' }}>
+        <h3 style={{ margin: 0 }}>抢占评估报告 · {pcase.code}</h3>
+        <button className="close-x" onClick={onClose}>×</button>
+      </div>
+      <div className="grid grid-4" style={{ margin: '12px 0' }}>
+        <div className="stat"><div className="label">预约车辆</div><div className="value" style={{ fontSize: 18 }}>{!a.hasActiveReservation ? '无在途预约' : a.vehicleEntered ? '已入场' : '未入场'}</div></div>
+        <div className="stat"><div className="label">剩余停车时长</div><div className="value" style={{ fontSize: 18 }}>{a.remainingMinutes} 分钟</div></div>
+        <div className="stat"><div className="label">附近可替代车位</div><div className="value" style={{ fontSize: 18 }}>{a.alternatives.length} 个</div></div>
+        <div className="stat"><div className="label">历史提前结束</div><div className="value" style={{ fontSize: 18, color: a.ownerHistoryCount > 0 ? 'var(--red)' : undefined }}>{a.ownerHistoryCount} 次</div></div>
+      </div>
+      <div className="alert info">
+        <b>平台评估：</b>
+        <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+          {(a.reasons ?? []).map((r: string, i: number) => <li key={i}>{r}</li>)}
+        </ul>
+      </div>
+
+      {pcase.status === 'relocatable' && (
+        <div style={{ marginTop: 12 }}>
+          <h3 style={{ fontSize: 14 }}>方案一：为车主安排换位（推荐）</h3>
+          <div className="btn-row" style={{ alignItems: 'center' }}>
+            <select value={altId} onChange={(e) => setAltId(Number(e.target.value))}>
+              {a.alternatives.map((s: any) => (
+                <option key={s.id} value={s.id}>
+                  {s.code} · {s.hourly_rate} 元/时{s.near_charger ? ' · 充电位' : ''}{s.location_desc ? ` · ${s.location_desc}` : ''}
+                </option>
+              ))}
+            </select>
+            <button className="btn success" disabled={!altId} onClick={relocate}>🔀 确认换位并收回车位</button>
+          </div>
+          <div className="small muted" style={{ marginTop: 6 }}>
+            车主将收到换位导航（原预约时段与价格不变），并获得换位补偿：现金 ¥10（从您的分成扣减）+ 平台券 ¥5。
+          </div>
+          <h3 style={{ fontSize: 14, marginTop: 14 }}>方案二：其他处置</h3>
+        </div>
+      )}
+
+      {['relocatable', 'awaiting_owner_choice'].includes(pcase.status) && (
+        <div className="btn-row" style={{ marginTop: 8 }}>
+          <button className="btn ghost" onClick={() => choose('wait', '已登记：等待车主离场，车主离场后请及时确认收回')}>⏳ 等待车主离场</button>
+          <button className="btn danger" onClick={() => choose('breach_compensation', '已按违约收回车位：订单将按实际时长结算，您需支付车主违约补偿 ¥20（信用 -5）')}>💸 支付违约补偿收回</button>
+          <button className="btn gray" onClick={() => choose('property_coordination', '已申请物业协调，请等待值班员到场处理')}>🙋 申请物业协调</button>
+          <button className="btn gray" onClick={() => onAction(() => api('POST', `/dispatch/preempt/${pcase.id}/cancel`, {}), '已取消本次提前回家')}>取消</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 进行中的抢占处理单卡片（业主/物业共用）
+export function PreemptionCard({ item: c, role, onRefresh }: { item: any; role: 'owner' | 'property'; onRefresh: () => void }) {
+  const [err, setErr] = useState('');
+  const act = async (fn: () => Promise<any>) => {
+    setErr('');
+    try { await fn(); onRefresh(); } catch (e: any) { setErr(e.message); }
+  };
+  const resolve = () => {
+    const resolution = prompt('处置结果说明', c.status === 'waiting' ? '车主已离场，业主收回车位' : '物业协调完成，车主继续停至预约结束');
+    if (resolution === null) return;
+    act(() => api('POST', `/dispatch/preempt/${c.id}/resolve`, { resolution }));
+  };
+  const breach = () => {
+    const resolution = prompt('判定业主收回车位的协调结论', '现场协调无果，业主收回车位，按违约补偿车主');
+    if (resolution === null) return;
+    act(() => api('POST', `/dispatch/preempt/${c.id}/resolve`, { resolution, action: 'breach' }));
+  };
+  return (
+    <div className={`ticket-card ${c.status === 'awaiting_owner_choice' ? 'open' : 'notified'}`}>
+      <div className="ticket-head">
+        <span className="ticket-title">提前回家抢占 · {c.spot_code} <span className="mono small muted">{c.code}</span></span>
+        <Tag status={c.status} />
+      </div>
+      <div className="ticket-desc">
+        {c.driver_name ? `在场车主 ${c.driver_name}（${c.plate ?? '—'}）` : '无在途预约'}
+        {c.vehicle_entered ? ' · 车辆已入场' : c.driver_name ? ' · 车辆未入场' : ''}
+        {' '}· 剩余 {c.remaining_minutes} 分钟 · 历史提前结束 {c.owner_history_count} 次
+      </div>
+      <div className="small muted">{dt(c.occurred_at)} 上报{c.reservation_code ? ` · 订单 ${c.reservation_code}` : ''}</div>
+      {err && <div className="alert error" style={{ marginTop: 6 }}>{err}</div>}
+      <div className="btn-row" style={{ marginTop: 8 }}>
+        {role === 'owner' && c.status === 'waiting' && (
+          <button className="btn sm success" onClick={resolve}>车主已离场，确认收回</button>
+        )}
+        {role === 'property' && c.status === 'property_coordination' && (
+          <>
+            <button className="btn sm success" onClick={resolve}>协调完成（车主继续停）</button>
+            <button className="btn sm danger" onClick={breach}>判定业主收回（违约补偿）</button>
+          </>
+        )}
       </div>
     </div>
   );

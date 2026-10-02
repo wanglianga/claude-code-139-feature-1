@@ -6,6 +6,7 @@ import { SpotsModule } from './spots/spots.module';
 import { ReservationsModule } from './reservations/reservations.module';
 import { OperationsModule } from './operations/operations.module';
 import { DispatchModule } from './dispatch/dispatch.module';
+import { PreemptionModule } from './preemption/preemption.module';
 import { AppealsModule } from './appeals/appeals.module';
 import { SettlementModule } from './settlement/settlement.module';
 
@@ -18,6 +19,7 @@ import { SettlementModule } from './settlement/settlement.module';
     ReservationsModule,
     OperationsModule,
     DispatchModule,
+    PreemptionModule,
     AppealsModule,
     SettlementModule,
   ],

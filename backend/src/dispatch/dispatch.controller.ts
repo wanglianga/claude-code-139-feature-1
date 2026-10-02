@@ -37,6 +37,10 @@ const INCIDENT_INFO: Record<string, { label: string; noticeTemplate: string }> =
     label: '物业人工放行',
     noticeTemplate: '物业已人工放行，入场服务已绑定到您的预约单',
   },
+  owner_preempt: {
+    label: '业主提前回家抢占',
+    noticeTemplate: '业主申请提前回家，平台正在为您协调车位安排',
+  },
 };
 
 @Controller('dispatch')

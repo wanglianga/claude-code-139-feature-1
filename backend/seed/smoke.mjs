@@ -88,8 +88,8 @@ async function main() {
       charger_power_kw: opts.charger ? 7 : undefined,
       allow_visitor: true,
       monthly_priority: opts.monthly ?? false,
-      hourly_rate: 5,
-      overnight_cap: 45,
+      hourly_rate: opts.rate ?? 5,
+      overnight_cap: opts.cap ?? 45,
       windows,
     });
   }
@@ -351,7 +351,143 @@ async function main() {
   check('D 流水含平台先行赔付（追缴）记录', stD.ledger.some((l) => l.memo.includes('先行赔付')));
   check('D 流水借贷平衡', ledgerBalanced(stD.ledger));
 
-  console.log('== 7. 共同追溯：分账流水、调度总览、单订单全链路事件、巡查档案 ==');
+  console.log('== 7. 业主提前回家抢占：不可替换 → 等待 → 违约补偿收回（车位 F）==');
+  // 业主历史提前结束基数（场景 5 的回家工单已计入；相对断言，重复执行也成立）
+  const mineBefore = await api('GET', '/spots/mine', owner.token);
+  const baseHistory = mineBefore.reduce((a, s) => a + Number(s.early_return_count ?? 0), 0);
+  // 把所有现存的已上架充电车位用占位预约锁死（覆盖 F 剩余时段），确保 F 无充电替代车位。
+  // 窗口不覆盖/时段已冲突的车位预约会失败——它们本来就不能成为替代，跳过即可（重复执行安全）。
+  const chargerSpots = await api('GET', '/spots?need_charger=true', driver1.token);
+  for (const cs of chargerSpots) {
+    try {
+      await api('POST', '/reservations', driver1.token, {
+        spot_id: Number(cs.id), vehicle_id: neCar.id, start_at: at(130), end_at: at(300),
+      });
+    } catch { /* 见上注释 */ }
+  }
+  const spotF = await publish(`F${RUN}`, { charger: true });
+  await api('POST', `/spots/${spotF.id}/review`, prop.token, { pass: true });
+  const reserveF = await api('POST', '/reservations', driver1.token, {
+    spot_id: spotF.id, vehicle_id: neCar.id, start_at: at(0), end_at: at(240),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveF.id, plate: neCar.plate, gate: '南门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveF.id}/parked`, driver1.token, {
+    actual_spot_code: spotF.code, parked_at: at(0),
+  });
+  const preemptF = await api('POST', '/dispatch/preempt', owner.token, {
+    spot_id: spotF.id, eta_minutes: 15, occurred_at: at(150),
+  });
+  check('F 评估：车辆已入场、剩余 90 分钟', preemptF.assessment.vehicleEntered === true && preemptF.assessment.remainingMinutes === 90, preemptF.assessment);
+  check('F 评估：充电替代车位全冲突，不可替换', preemptF.assessment.replaceable === false && preemptF.case.status === 'awaiting_owner_choice', preemptF.assessment.alternatives);
+  check('F 评估：业主历史提前结束次数（含场景5回家工单）', preemptF.assessment.ownerHistoryCount === baseHistory, preemptF.assessment.ownerHistoryCount);
+  const expectedFAction = baseHistory >= 3 ? 'property_coordination' : 'breach_compensation';
+  check(`F 评估：按历史次数给出处置建议（${expectedFAction}）`, preemptF.assessment.recommendedAction === expectedFAction, preemptF.assessment.recommendedAction);
+  const waitF = await api('POST', `/dispatch/preempt/${preemptF.case.id}/choose`, owner.token, { action: 'wait' });
+  check('F 业主先选择等待车主离场', waitF.status === 'waiting');
+  const breachF = await api('POST', `/dispatch/preempt/${preemptF.case.id}/choose`, owner.token, { action: 'breach_compensation' });
+  check('F 等不及改为支付违约补偿收回', breachF.status === 'breach_settled');
+  const incF = await api('GET', '/dispatch/incidents?status=notified', prop.token);
+  check('F 收回后产生业主回家挪车工单', incF.some((t) => t.type === 'owner_return' && t.reservation_id === reserveF.id));
+  const appealF = await api('POST', '/appeals', driver1.token, {
+    reservation_id: reserveF.id, reason: '业主提前回家，支付违约补偿要求我挪车',
+  });
+  check('F 抢占事件进入证据链并自动建议业主责任', appealF.adjudication.ruling === 'owner_fault', appealF.adjudication);
+  await api('POST', `/appeals/${appealF.appeal.id}/rule`, prop.token, { ruling: 'owner_fault', note: '业主提前回家违约收回' });
+  const stF = await api('POST', `/reservations/${reserveF.id}/exit`, driver1.token, { exit_at: at(160) });
+  check('F 按实际可用时长计费（150 分钟）', stF.duration_minutes === 150, stF.duration_minutes);
+  check('F 违约补偿 20 元随退款发放（退款 27.5）', Number(stF.abnormal_compensation) === 20 && Number(stF.refund) === 27.5, stF);
+  check('F 业主信用 -5', stF.credit_target === 'owner' && Number(stF.credit_delta) === -5, stF);
+  check('F 流水借贷平衡', ledgerBalanced(stF.ledger));
+
+  console.log('== 8. 业主提前回家抢占：可替换 → 换位导航+费用补偿（车位 E）==');
+  const spotE1 = await publish(`E${RUN}A`, { charger: true });
+  const spotE2 = await publish(`E${RUN}B`, { charger: true, rate: 6, cap: 50 });
+  await api('POST', `/spots/${spotE1.id}/review`, prop.token, { pass: true });
+  await api('POST', `/spots/${spotE2.id}/review`, prop.token, { pass: true });
+  const reserveE = await api('POST', '/reservations', driver1.token, {
+    spot_id: spotE1.id, vehicle_id: neCar.id, start_at: at(0), end_at: at(240),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveE.id, plate: neCar.plate, gate: '南门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveE.id}/parked`, driver1.token, {
+    actual_spot_code: spotE1.code, parked_at: at(0),
+  });
+  const preemptE = await api('POST', '/dispatch/preempt', owner.token, {
+    spot_id: spotE1.id, eta_minutes: 20, occurred_at: at(120),
+  });
+  check('E 评估：车辆已入场、剩余 120 分钟', preemptE.assessment.vehicleEntered === true && preemptE.assessment.remainingMinutes === 120, preemptE.assessment);
+  check('E 评估：找到附近可替代车位（含 E2）', preemptE.assessment.replaceable === true && preemptE.assessment.alternatives.some((a) => a.id === spotE2.id), preemptE.assessment.alternatives);
+  check('E 评估：状态可换位并建议换位', preemptE.case.status === 'relocatable' && preemptE.assessment.recommendedAction === 'relocate');
+  check('E 评估：历史提前结束累计 +1（场景5+F）', preemptE.assessment.ownerHistoryCount === baseHistory + 1, preemptE.assessment.ownerHistoryCount);
+  const relocE = await api('POST', `/dispatch/preempt/${preemptE.case.id}/relocate`, owner.token, { alternative_spot_id: spotE2.id });
+  check('E 换位成功：现金补偿 10 + 平台券 5', relocE.case.status === 'relocated' && Number(relocE.case.compensation_amount) === 10 && Number(relocE.case.coupon_compensation) === 5, relocE.case);
+  check('E 车主收到换位导航', relocE.guidance.steps.length >= 3 && relocE.guidance.voice.includes(spotE2.code), relocE.guidance);
+  const reserveEAfter = await api('GET', `/reservations/${reserveE.id}`, driver1.token);
+  check('E 预约已迁移至替代车位并标记已换位', reserveEAfter.spot_id === spotE2.id && reserveEAfter.relocated === true, reserveEAfter.spot_id);
+  const couponsAfter = await api('GET', '/coupons', driver1.token);
+  check('E 换位补偿券已发到车主账户', couponsAfter.some((c) => c.code.startsWith('RELOC') && Number(c.amount) === 5 && !c.used_at));
+  const preemptTickets = await api('GET', '/dispatch/incidents?status=resolved', prop.token);
+  const relocTicket = preemptTickets.find((t) => t.type === 'owner_preempt' && t.reservation_id === reserveE.id);
+  const relocNotices = relocTicket ? await api('GET', `/dispatch/incidents/${relocTicket.id}/notices`, prop.token) : [];
+  check('E 换位导航通知已送达车主（App+LED）', !!relocTicket && relocNotices.some((n) => n.message.includes('换位导航')), relocNotices);
+  const stE = await api('POST', `/reservations/${reserveE.id}/exit`, driver1.token, { exit_at: at(240) });
+  check('E 计费锚定原车位价格（4h×5=20，非替代位 6 元价）', Number(stE.base_fee) === 20, stE.base_fee);
+  check('E 换位现金补偿 10 元计入异常补偿', Number(stE.abnormal_compensation) === 10, stE);
+  check('E 业主分成扣减换位补偿（14-10=4）', Number(stE.owner_income) === 4, stE.owner_income);
+  check('E 服务未截断（240 分钟）且车主获退款 10 元', stE.duration_minutes === 240 && Number(stE.refund) === 10, stE);
+  check('E 流水借贷平衡', ledgerBalanced(stE.ledger));
+
+  console.log('== 9. 业主提前回家抢占：申请物业协调（车位 G）==');
+  const spotG = await publish(`G${RUN}`);
+  await api('POST', `/spots/${spotG.id}/review`, prop.token, { pass: true });
+  const reserveG = await api('POST', '/reservations', driver2.token, {
+    spot_id: spotG.id, vehicle_id: visitorCar.id, start_at: at(0), end_at: at(240),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveG.id, plate: visitorCar.plate, gate: '北门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveG.id}/parked`, driver2.token, {
+    actual_spot_code: spotG.code, parked_at: at(0),
+  });
+  const preemptG = await api('POST', '/dispatch/preempt', owner.token, {
+    spot_id: spotG.id, eta_minutes: 25, occurred_at: at(100),
+  });
+  check('G 评估：历史提前结束累计 +2（场景5+F+E）', preemptG.assessment.ownerHistoryCount === baseHistory + 2, preemptG.assessment.ownerHistoryCount);
+  check('G 可替换（普通位替代充足）', preemptG.case.status === 'relocatable');
+  const coordG = await api('POST', `/dispatch/preempt/${preemptG.case.id}/choose`, owner.token, { action: 'property_coordination', note: '希望物业现场确认' });
+  check('G 业主选择申请物业协调', coordG.status === 'property_coordination');
+  const coordList = await api('GET', '/dispatch/preempt?status=property_coordination', prop.token);
+  check('G 物业调度看板可见协调单', coordList.some((c) => c.id === preemptG.case.id));
+  const resolveG = await api('POST', `/dispatch/preempt/${preemptG.case.id}/resolve`, prop.token, { resolution: '物业现场确认：车主继续停至预约结束，业主暂缓收回' });
+  check('G 物业协调完成', resolveG.status === 'resolved');
+  const stG = await api('POST', `/reservations/${reserveG.id}/exit`, driver2.token, { exit_at: at(240) });
+  check('G 协调后继续停：正常计费无补偿', Number(stG.base_fee) === 20 && Number(stG.abnormal_compensation) === 0, stG);
+  check('G 流水借贷平衡', ledgerBalanced(stG.ledger));
+
+  console.log('== 10. 提前结束写入发布记录：后续开放时段审核更谨慎 ==');
+  const spotH = await publish(`H${RUN}`);
+  const pending = await api('GET', '/spots/review/pending', prop.token);
+  const pendingH = pending.find((s) => s.id === spotH.id);
+  check('H 审核队列展示业主提前结束次数与谨慎提示', !!pendingH && pendingH.owner_early_return_count === baseHistory + 3 && pendingH.review_caution === true && pendingH.review_hint.includes('谨慎'), pendingH);
+  const mine = await api('GET', '/spots/mine', owner.token);
+  check('H 车位档案记录提前结束次数（F/E1/G 各 1 次）',
+    Number(mine.find((s) => s.id === spotF.id)?.early_return_count) === 1 &&
+    Number(mine.find((s) => s.id === spotE1.id)?.early_return_count) === 1 &&
+    Number(mine.find((s) => s.id === spotG.id)?.early_return_count) === 1,
+    mine.map((s) => `${s.code}:${s.early_return_count}`));
+  const detailH = await api('GET', `/spots/${spotH.id}`, owner.token);
+  check('H 发布记录提示后续审核更谨慎', !!detailH.publish_hint && detailH.publish_hint.includes('更谨慎'), detailH.publish_hint);
+  const preemptAll = await api('GET', '/dispatch/preempt', prop.token);
+  check('平台留存全部抢占处理单（F/E/G 三单）', [preemptF, preemptE, preemptG].every((p) => preemptAll.some((c) => c.id === p.case.id)));
+  const driverCases = await api('GET', '/dispatch/preempt?status=relocated', driver1.token);
+  check('车主可见自己订单的换位记录', driverCases.some((c) => c.id === preemptE.case.id));
+  const detailE = await api('GET', `/reservations/${reserveE.id}`, driver1.token);
+  check('E 订单事件流含评估与换位记录', ['preemption_assessed', 'spot_relocated'].every((t) => detailE.events.some((e) => e.type === t)), detailE.events.map((e) => e.type));
+
+  console.log('== 11. 共同追溯：分账流水、调度总览、单订单全链路事件、巡查档案 ==');
   const ledger = await api('GET', '/ledger', prop.token);
   check(
     '分账流水覆盖车主/业主/物业/平台/券池/托管账户',

@@ -235,5 +235,44 @@ CREATE TABLE IF NOT EXISTS patrol_logs (
   patrolled_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 业主提前回家抢占处理单：评估快照（是否入场/剩余时长/替代车位/历史提前结束次数）
+-- + 业主选择（换位/等待/违约收回/物业协调）+ 补偿与处置结果，全程写入业主发布记录
+CREATE TABLE IF NOT EXISTS preemption_cases (
+  id BIGSERIAL PRIMARY KEY,
+  code TEXT UNIQUE NOT NULL,
+  spot_id BIGINT NOT NULL REFERENCES parking_spots(id),
+  reservation_id BIGINT REFERENCES reservations(id),
+  owner_id BIGINT NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'assessing' CHECK (status IN (
+    'assessing','relocatable','awaiting_owner_choice','waiting',
+    'relocated','breach_settled','property_coordination','resolved','cancelled'
+  )),
+  vehicle_entered BOOLEAN NOT NULL DEFAULT false,   -- 当前预约车辆是否已入场
+  remaining_minutes INT NOT NULL DEFAULT 0,         -- 上报时点剩余停车时长
+  owner_history_count INT NOT NULL DEFAULT 0,       -- 业主历史提前结束次数（含本次前）
+  alternatives JSONB NOT NULL DEFAULT '[]'::jsonb,  -- 评估到的附近可替代车位快照
+  alternative_spot_id BIGINT REFERENCES parking_spots(id), -- 实际换位目标车位
+  chosen_action TEXT CHECK (chosen_action IN ('relocate','wait','breach_compensation','property_coordination')),
+  compensation_amount NUMERIC(10,2) NOT NULL DEFAULT 0,  -- 换位现金补偿（业主承担，结算时从分成扣）
+  coupon_compensation NUMERIC(10,2) NOT NULL DEFAULT 0,  -- 平台换位补偿券（非现金）
+  assessment JSONB NOT NULL DEFAULT '{}'::jsonb,    -- 评估理由/推荐动作/原车位费率快照
+  resolution TEXT,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),   -- 业主提前回家时点（可补录）
+  resolved_by BIGINT REFERENCES users(id),
+  resolved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_preemption_spot ON preemption_cases(spot_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_preemption_owner ON preemption_cases(owner_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_preemption_reservation ON preemption_cases(reservation_id);
+
 -- 幂等迁移：为旧版本库补充后续新增列
 ALTER TABLE settlements ADD COLUMN IF NOT EXISTS coupon_compensation NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+-- 幂等迁移：异常工单类型扩展 owner_preempt（业主提前回家抢占：换位通知/物业协调挂靠）
+ALTER TABLE incident_tickets DROP CONSTRAINT IF EXISTS incident_tickets_type_check;
+ALTER TABLE incident_tickets ADD CONSTRAINT incident_tickets_type_check
+  CHECK (type IN (
+    'owner_return','visitor_overstay','stranger_occupy','recognition_fail',
+    'weak_signal','ice_occupy_charger','wrong_parking','manual_release','owner_preempt'
+  ));

@@ -260,7 +260,8 @@ export class ReservationsController {
     return `
       SELECT r.*, s.code AS spot_code, s.location_desc, s.near_charger, c.name AS community_name,
              u.name AS driver_name, v.is_new_energy, v.is_monthly, v.is_visitor,
-             ow.name AS owner_name
+             ow.name AS owner_name,
+             EXISTS (SELECT 1 FROM preemption_cases pc WHERE pc.reservation_id=r.id AND pc.status='relocated') AS relocated
       FROM reservations r
       JOIN parking_spots s ON s.id=r.spot_id
       JOIN communities c ON c.id=s.community_id

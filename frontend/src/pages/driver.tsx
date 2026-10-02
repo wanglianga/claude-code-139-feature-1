@@ -285,6 +285,12 @@ function ServiceActionModal({ order, onClose, onChanged, onSettlement }: any) {
           <div className="small muted" style={{ marginBottom: 12 }}>
             车位 {order.community_name} {order.spot_code} · {order.plate} · 预约 {dt(order.start_at)} ~ {dt(order.end_at)}
           </div>
+          {order.relocated && (
+            <div className="alert ok" style={{ marginBottom: 12 }}>
+              🔀 业主提前回家，平台已将本单换位至 <b>{order.spot_code}</b>：原预约时段与价格不变，
+              换位补偿（现金 + 平台券）已发放，请按新导航前往停放。
+            </div>
+          )}
 
           <div className="grid grid-2">
             <div className="card" style={{ marginTop: 0 }}>

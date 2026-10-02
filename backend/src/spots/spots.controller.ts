@@ -32,6 +32,19 @@ class ReviewDto {
 export class SpotsController {
   constructor(private db: DbService) {}
 
+  // 业主历史提前结束次数（写入发布记录：抢占处理单 + 未关联抢占的历史回家工单）
+  private static readonly OWNER_EARLY_RETURNS_SQL = `
+    (SELECT count(*) FROM preemption_cases p WHERE p.owner_id=s.owner_id AND p.status<>'cancelled')
+    +
+    (SELECT count(*) FROM incident_tickets i JOIN parking_spots s2 ON s2.id=i.spot_id
+      WHERE s2.owner_id=s.owner_id AND i.type='owner_return' AND NOT (i.detail ? 'preemption_case_id'))`;
+
+  // 单车位提前结束次数
+  private static readonly SPOT_EARLY_RETURNS_SQL = `
+    (SELECT count(*) FROM preemption_cases p WHERE p.spot_id=s.id AND p.status<>'cancelled')
+    +
+    (SELECT count(*) FROM incident_tickets i WHERE i.spot_id=s.id AND i.type='owner_return' AND NOT (i.detail ? 'preemption_case_id'))`;
+
   @Get('communities')
   communities() {
     return this.db.query(`SELECT * FROM communities ORDER BY id`).then((r) => r.rows);
@@ -112,7 +125,8 @@ export class SpotsController {
       .query(
         `SELECT s.*, c.name AS community_name,
           (SELECT json_agg(json_build_object('weekday',weekday,'start_time',start_time::text,'end_time',end_time::text))
-             FROM spot_share_windows w WHERE w.spot_id=s.id) AS windows
+             FROM spot_share_windows w WHERE w.spot_id=s.id) AS windows,
+          (${SpotsController.SPOT_EARLY_RETURNS_SQL})::int AS early_return_count
          FROM parking_spots s JOIN communities c ON c.id=s.community_id
          WHERE s.owner_id=$1 ORDER BY s.id DESC`,
         [user.sub],
@@ -146,19 +160,31 @@ export class SpotsController {
     return this.getDetail(this.db, id);
   }
 
-  // 物业审核队列
+  // 物业审核队列（含业主提前结束记录：次数偏多时提示更谨慎审核开放时段）
   @Roles('property', 'admin')
   @Get('review/pending')
   pendingReview() {
     return this.db
       .query(
-        `SELECT s.*, c.name AS community_name, u.name AS owner_name, u.phone AS owner_phone
+        `SELECT s.*, c.name AS community_name, u.name AS owner_name, u.phone AS owner_phone,
+           (${SpotsController.OWNER_EARLY_RETURNS_SQL})::int AS owner_early_return_count
          FROM parking_spots s
          JOIN communities c ON c.id=s.community_id
          JOIN users u ON u.id=s.owner_id
          WHERE s.review_status='pending' ORDER BY s.created_at`,
       )
-      .then((r) => r.rows);
+      .then((r) =>
+        r.rows.map((s) => ({
+          ...s,
+          review_caution: s.owner_early_return_count >= 2,
+          review_hint:
+            s.owner_early_return_count >= 2
+              ? `该业主已有 ${s.owner_early_return_count} 次提前结束共享记录，请谨慎审核其开放时段（可要求缩短共享窗口或补充说明）`
+              : s.owner_early_return_count === 1
+                ? '该业主有 1 次提前结束共享记录，审核开放时段时请关注'
+                : null,
+        })),
+      );
   }
 
   @Get(':id')
@@ -170,13 +196,23 @@ export class SpotsController {
     const { rows } = await client.query(
       `SELECT s.*, c.name AS community_name, u.name AS owner_name, u.phone AS owner_phone,
         (SELECT json_agg(json_build_object('weekday',weekday,'start_time',start_time::text,'end_time',end_time::text))
-           FROM spot_share_windows w WHERE w.spot_id=s.id) AS windows
+           FROM spot_share_windows w WHERE w.spot_id=s.id) AS windows,
+        (${SpotsController.SPOT_EARLY_RETURNS_SQL})::int AS early_return_count,
+        (${SpotsController.OWNER_EARLY_RETURNS_SQL})::int AS owner_early_return_count
        FROM parking_spots s
        JOIN communities c ON c.id=s.community_id
        JOIN users u ON u.id=s.owner_id
        WHERE s.id=$1`,
       [id],
     );
-    return rows[0];
+    const spot = rows[0];
+    if (spot) {
+      // 提前结束记录偏多：发布与审核环节都给出谨慎提示
+      spot.review_caution = spot.owner_early_return_count >= 2;
+      spot.publish_hint = spot.review_caution
+        ? `您已有 ${spot.owner_early_return_count} 次提前结束共享记录，本次及后续开放时段的审核将更谨慎`
+        : null;
+    }
+    return spot;
   }
 }

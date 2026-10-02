@@ -282,6 +282,13 @@ const EVENT_LABEL: Record<string, string> = {
   settlement_recomputed: '分账重算',
   credit_adjusted: '信用调整',
   monthly_priority_conflict: '月租优先冲突',
+  preemption_assessed: '提前回家评估',
+  spot_relocated: '换位至替代车位',
+  preemption_wait: '业主选择等待',
+  preemption_breach: '违约收回车位',
+  preemption_coordination_requested: '申请物业协调',
+  preemption_resolved: '抢占处置完成',
+  preemption_cancelled: '取消提前回家',
 };
 
 const EVENT_COLOR: Record<string, string> = {
@@ -289,6 +296,9 @@ const EVENT_COLOR: Record<string, string> = {
   owner_return_report: 'amber', weak_signal_report: 'amber', move_notice_sent: 'amber',
   gate_entry: 'cyan', parking_confirmed: 'green', settlement_completed: 'blue',
   appeal_ruled: 'purple', manual_release: 'purple', incident_resolved: 'green',
+  preemption_assessed: 'amber', spot_relocated: 'green', preemption_wait: 'cyan',
+  preemption_breach: 'red', preemption_coordination_requested: 'purple',
+  preemption_resolved: 'green', preemption_cancelled: 'gray',
 };
 
 export function ServiceEvents({ events }: { events: any[] }) {
