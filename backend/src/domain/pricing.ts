@@ -63,6 +63,8 @@ export interface PriceInput {
   ruling?: Ruling | null;
   couponAmount?: number;
   prepaid: number;
+  // 业主提前回家且平台已为车主协调替代车位时的换位费用补偿（>0 时替代默认违约补偿）
+  relocationCompensation?: number;
 }
 
 export interface LedgerDraft {
@@ -178,9 +180,20 @@ export function settlePrice(input: PriceInput): SettlementBreakdown {
   // 现金补偿（业主/陌生车责任，进入退款-托管资金流）与赔付券（平台/物业/信号问题，非现金，下次抵扣）分开
   let cashCompensation = 0;
   let couponCompensation = 0;
-  if (ruling === 'owner_fault' || ownerReturn) {
-    cashCompensation += PRICING.ownerReturnCompensation;
-    notes.push(`业主临时回家违约，现金补偿车主 ¥${PRICING.ownerReturnCompensation}`);
+  // 业主提前回家：已协调替代车位时支付换位费用补偿（低于违约补偿）；否则按违约补偿
+  const ownerReturnCash =
+    ruling === 'owner_fault' || ownerReturn
+      ? (input.relocationCompensation ?? 0) > 0
+        ? round2(input.relocationCompensation!)
+        : PRICING.ownerReturnCompensation
+      : 0;
+  if (ownerReturnCash > 0) {
+    cashCompensation += ownerReturnCash;
+    notes.push(
+      ownerReturnCash < PRICING.ownerReturnCompensation
+        ? `业主提前回家，平台已为车主协调替代车位换位，业主支付换位费用补偿 ¥${ownerReturnCash}`
+        : `业主临时回家违约，现金补偿车主 ¥${ownerReturnCash}`,
+    );
   }
   if (ruling === 'platform_fault' || input.incidents.some((i) => i.type === 'weak_signal')) {
     couponCompensation += PRICING.platformFaultCoupon;
@@ -215,7 +228,8 @@ export function settlePrice(input: PriceInput): SettlementBreakdown {
   const fineResidual = round2(Math.max(0, wrongParkFine - ownerCompensation));
 
   // 业主在"业主回家"场景需要向车主支付的补偿，先从其分成中扣减，不足部分平台垫付
-  const ownerPaysComp = ruling === 'owner_fault' || ownerReturn ? PRICING.ownerReturnCompensation : 0;
+  // 已成功换位时为换位费用补偿（较低），无法替换时为违约补偿
+  const ownerPaysComp = ownerReturnCash;
   if (ownerPaysComp > 0) {
     notes.push(
       `业主承担车主补偿 ¥${ownerPaysComp}：优先从业主分成 ¥${ownerShareEarn} 中扣除，不足部分平台垫付并保留追缴权`,

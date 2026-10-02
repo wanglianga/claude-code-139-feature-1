@@ -40,8 +40,31 @@ export const STATUS_TAG: Record<string, { label: string; cls: string }> = {
   upheld: { label: '申诉成立', cls: 'green' },
   rejected_appeal: { label: '申诉驳回', cls: 'red' },
 
+  offered: { label: '待车主响应', cls: 'amber' },
+  accepted: { label: '已接受换位', cls: 'green' },
+  declined: { label: '已拒绝', cls: 'red' },
+  expired: { label: '已失效', cls: 'gray' },
+
+  coordinating: { label: '物业协调中', cls: 'cyan' },
+  relocated: { label: '已换位', cls: 'green' },
+  failed: { label: '协调失败', cls: 'red' },
+
+  owner_wait: { label: '业主选择等待', cls: 'gray' },
+  breach_paid: { label: '已付违约补偿', cls: 'amber' },
+  property_coordinating: { label: '物业协调中', cls: 'cyan' },
+  coordinated: { label: '物业协调换位', cls: 'green' },
+
+  auto_approved: { label: '系统自动通过', cls: 'green' },
+  restricted: { label: '限制通过', cls: 'amber' },
+
   normal: { label: '月租优先', cls: 'gray' },
   monthly: { label: '月租优先', cls: 'purple' },
+};
+
+export const RISK_TAG: Record<string, { label: string; cls: string }> = {
+  low: { label: '低风险', cls: 'green' },
+  medium: { label: '中风险 · 时段需人工复核', cls: 'amber' },
+  high: { label: '高风险 · 开放时段从严审核', cls: 'red' },
 };
 
 export const RULING: Record<string, { label: string; cls: string }> = {

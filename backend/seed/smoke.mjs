@@ -59,6 +59,7 @@ async function main() {
 
   console.log('== 1. 登录、发券、物业审核队列 ==');
   const owner = await login('owner1');
+  const owner2 = await login('owner2');
   const driver1 = await login('driver1');
   const driver2 = await login('driver2');
   const prop = await login('property1');
@@ -351,7 +352,164 @@ async function main() {
   check('D 流水含平台先行赔付（追缴）记录', stD.ledger.some((l) => l.memo.includes('先行赔付')));
   check('D 流水借贷平衡', ledgerBalanced(stD.ledger));
 
-  console.log('== 7. 共同追溯：分账流水、调度总览、单订单全链路事件、巡查档案 ==');
+  console.log('== 7. 业主提前回家抢占处理：评估 → 换位 / 物业协调 / 违约补偿 → 发布记录与时段审核 ==');
+  // 5 个新车位：R1/R2 换位场景，R3/R4 拒绝+物业协调场景，R5 充电位（制造无法替换场景）
+  const rcodes = { R1: `F${RUN}1`, R2: `F${RUN}2`, R3: `F${RUN}3`, R4: `F${RUN}4`, R5: `F${RUN}5`, R6: `F${RUN}6` };
+  const publishedR = {};
+  for (const [k, code] of Object.entries(rcodes)) {
+    publishedR[k] = await publish(code, { charger: k === 'R5' });
+    await api('POST', `/spots/${publishedR[k].id}/review`, prop.token, { pass: true, remark: '产权材料齐全' });
+  }
+
+  // --- 7.1 可替换：车主已入场，业主提前回家，平台匹配替代车位，车主接受换位 ---
+  const reserveR1 = await api('POST', '/reservations', driver1.token, {
+    spot_id: publishedR.R1.id, vehicle_id: neCar.id, start_at: at(0), end_at: at(120),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveR1.id, plate: neCar.plate, gate: '南门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveR1.id}/parked`, driver1.token, {
+    actual_spot_code: rcodes.R1, parked_at: at(5),
+  });
+  const retR1 = await api('POST', '/dispatch/owner-return', owner.token, {
+    spot_id: publishedR.R1.id, eta_minutes: 10, occurred_at: at(60),
+  });
+  check('抢占评估：预约车辆已入场并给出剩余时长（约60分钟）', retR1.assessment.car_on_site === true && retR1.assessment.remaining_minutes === 60, retR1.assessment);
+  check('抢占评估：历史提前结束次数计入（含订单C后为第2次）且升为中风险', retR1.record.early_termination_count === 2 && retR1.risk.level === 'medium', retR1.risk);
+  check('抢占评估：匹配到附近可替代车位', retR1.can_replace === true && retR1.candidates.length >= 1, retR1);
+  const offerR2 = retR1.candidates.find((c) => Number(c.spot_id) === Number(publishedR.R2.id));
+  check('替代车位含换位导航与¥15费用补偿', !!offerR2 && Number(offerR2.fee_compensation) === 15 && offerR2.navigation?.voice.includes(rcodes.R2), offerR2);
+
+  const accept = await api('POST', `/dispatch/relocations/${offerR2.offer_id}/respond`, driver1.token, {
+    accept: true, relocate_at: at(62),
+  });
+  check('接受换位：原单按业主上报时点截止实际可用时长（停放5分→上报60分=55分钟）', accept.origin_settlement.duration_minutes === 55, accept.origin_settlement.duration_minutes);
+  check('接受换位：业主支付¥15换位费用补偿（低于违约¥20）', Number(accept.origin_settlement.abnormal_compensation) === 15, accept.origin_settlement);
+  check('接受换位：原单资金流水借贷平衡', ledgerBalanced(accept.origin_settlement.ledger));
+  check('接受换位：生成替代车位新预约且入场状态延续', Number(accept.new_reservation.spot_id) === Number(publishedR.R2.id) && accept.new_reservation.status === 'admitted', accept.new_reservation);
+  check('接受换位：发放换位补差券（新车位剩余窗口约¥4.83）', Number(accept.topup_coupon) > 4.7 && Number(accept.topup_coupon) < 5, accept.topup_coupon);
+  const myOffers = await api('GET', '/dispatch/my-relocations', driver1.token);
+  check('车主可查到换位方案且状态为已接受、绑定新预约', myOffers.some((o) => o.id === offerR2.offer_id && o.status === 'accepted' && !!o.new_reservation_id));
+  const recordsAfterR1 = await api('GET', '/dispatch/owner-records', owner.token);
+  check('提前结束已写入业主发布记录（标记已换位）', recordsAfterR1.records.some((r) => r.spot_code === rcodes.R1 && r.resolution === 'relocated' && r.detail?.outcome?.relocated_to === rcodes.R2));
+
+  // --- 7.2 车主拒绝全部方案 → 业主申请物业协调 → 物业协调到 R4 并代确认 ---
+  const reserveR3 = await api('POST', '/reservations', driver1.token, {
+    spot_id: publishedR.R3.id, vehicle_id: neCar.id, start_at: at(0), end_at: at(120),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveR3.id, plate: neCar.plate, gate: '南门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveR3.id}/parked`, driver1.token, {
+    actual_spot_code: rcodes.R3, parked_at: at(5),
+  });
+  const retR3 = await api('POST', '/dispatch/owner-return', owner.token, {
+    spot_id: publishedR.R3.id, eta_minutes: 10, occurred_at: at(70),
+  });
+  check('第二次抢占：历史次数=3、风险升级为中风险', retR3.record.early_termination_count === 3 && retR3.risk.level === 'medium', retR3.risk);
+  for (const c of retR3.candidates) {
+    await api('POST', `/dispatch/relocations/${c.offer_id}/respond`, driver1.token, { accept: false, reason: '不想挪车' });
+  }
+  const dec3 = await api('POST', `/dispatch/owner-records/${retR3.record.id}/decision`, owner.token, {
+    action: 'property_coordination', note: '请物业帮忙协调',
+  });
+  check('业主提交物业协调请求', dec3.resolution === 'property_coordinating' && !!dec3.coordination?.id);
+  const pendingCoord = await api('GET', '/dispatch/coordinations?status=pending', prop.token);
+  const coord = pendingCoord.find((x) => x.record_code === retR3.record.code);
+  check('物业协调队列收到请求并带风险/历史次数', !!coord && coord.early_termination_count === 3, pendingCoord.map((x) => x.record_code));
+  const handled = await api('POST', `/dispatch/coordinations/${coord.id}/handle`, prop.token, {
+    action: 'relocated', spot_id: publishedR.R4.id, note: '电话确认后引导至 F 系列空位', relocate_at: at(72),
+  });
+  check('物业协调成功：代车主确认换位至新车位', handled.status === 'relocated' && Number(handled.new_reservation.spot_id) === Number(publishedR.R4.id), handled);
+  check('物业协调换位：原单¥15补偿且流水平衡', Number(handled.origin_settlement.abnormal_compensation) === 15 && ledgerBalanced(handled.origin_settlement.ledger));
+  const recordsAfterR3 = await api('GET', '/dispatch/owner-records', owner.token);
+  check('发布记录标记为物业协调换位（coordinated）', recordsAfterR3.records.some((r) => r.spot_code === rcodes.R3 && r.resolution === 'coordinated'));
+
+  // --- 7.3 无法替换：充电位车主，占用全部其他充电位，业主只能等待/违约/协调 ---
+  // 用第二位车主把其余三个充电位（种子 B2-108、冒烟 A、D）在该窗口全部占住
+  const chargerSpots = await api('GET', '/spots?community_id=1&need_charger=true', driver1.token);
+  const otherChargers = chargerSpots.filter((s) => s.id !== publishedR.R5.id);
+  check('场内至少存在 2 个其他充电位可用于制造占满', otherChargers.length >= 2, otherChargers.map((s) => s.code));
+  for (const s of otherChargers) {
+    // 用与换位匹配完全相同的窗口 [80,120] 占位：能约上则该位恰好变忙；
+    // 若因共享时段不覆盖而约不上，该窗口同样不可能通过候选校验，保证 can_replace 确定性
+    try {
+      await api('POST', '/reservations', driver2.token, {
+        spot_id: s.id, vehicle_id: ne2.id, start_at: at(80), end_at: at(120),
+      });
+    } catch { /* 该充电位在换位窗口不开放，不可能成为替代候选 */ }
+  }
+  const reserveR5 = await api('POST', '/reservations', driver1.token, {
+    spot_id: publishedR.R5.id, vehicle_id: neCar.id, start_at: at(0), end_at: at(120),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveR5.id, plate: neCar.plate, gate: '南门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveR5.id}/parked`, driver1.token, {
+    actual_spot_code: rcodes.R5, parked_at: at(5),
+  });
+  const retR5 = await api('POST', '/dispatch/owner-return', owner.token, {
+    spot_id: publishedR.R5.id, eta_minutes: 10, occurred_at: at(80),
+  });
+  check('其他充电位占满时无可替代车位（can_replace=false）', retR5.can_replace === false, retR5.candidates?.map((c) => c.spot_code));
+  check('无法替换时向业主给出等待/违约补偿/物业协调三选项', JSON.stringify(retR5.alternatives) === JSON.stringify(['owner_wait', 'breach_pay', 'property_coordination']));
+  const breach = await api('POST', `/dispatch/owner-records/${retR5.record.id}/decision`, owner.token, {
+    action: 'breach_pay', decided_at: at(82),
+  });
+  check('业主支付违约补偿：原单按实际时长（停放5分→上报80分=75分钟）结算并补偿¥20', Number(breach.settlement.abnormal_compensation) === 20 && breach.settlement.duration_minutes === 75, breach.settlement);
+  check('违约补偿单流水借贷平衡', ledgerBalanced(breach.settlement.ledger));
+  const recordsFinal = await api('GET', '/dispatch/owner-records', owner.token);
+  check('业主发布记录累计 4 次抢占（含订单C）且最近一次为 breach_paid', recordsFinal.summary.last_90d >= 4 && recordsFinal.records.some((r) => r.spot_code === rcodes.R5 && r.resolution === 'breach_paid'), recordsFinal.summary);
+
+  // --- 7.4 后续开放时段审核：高风险业主转人工，物业可限制缩短；零记录业主自动通过 ---
+  const applyRisky = await api('POST', `/spots/${publishedR.R5.id}/share-windows`, owner.token, {
+    windows: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({ weekday, start_time: '00:00', end_time: '23:59' })),
+    reason: '希望全天开放',
+  });
+  check('高风险业主追加开放时段进入人工审核队列（不自动生效）', applyRisky.status === 'pending' && applyRisky.risk_level === 'high', applyRisky);
+  const pendingWin = await api('GET', '/spots/share-windows/pending', prop.token);
+  const wr = pendingWin.find((w) => w.spot_code === rcodes.R5);
+  check('物业审核队列展示风险等级与提前结束次数', !!wr && wr.early_termination_count >= 4, pendingWin.map((w) => w.spot_code));
+  await api('POST', `/spots/share-windows/${wr.id}/handle`, prop.token, {
+    decision: 'restricted',
+    windows: [1, 2, 3, 4, 5].map((weekday) => ({ weekday, start_time: '19:00', end_time: '22:00' })),
+    note: '提前结束频繁，先限缩为工作日夜间 3 小时观察',
+  });
+  const spotR5After = await api('GET', `/spots/${publishedR.R5.id}`, prop.token);
+  check('限制通过后时段按物业裁剪生效（仅工作日 19:00-22:00）',
+    spotR5After.windows.length === 5 && spotR5After.windows.every((w) => String(w.start_time).slice(0, 5) === '19:00' && String(w.end_time).slice(0, 5) === '22:00'),
+    spotR5After.windows);
+  const owner2Spots = await api('GET', '/spots/mine', owner2.token);
+  const owner2Spot = owner2Spots.find((s) => s.review_status === 'approved');
+  const applyOwner2 = await api('POST', `/spots/${owner2Spot.id}/share-windows`, owner2.token, {
+    windows: [{ weekday: 6, start_time: '09:00', end_time: '22:00' }],
+  });
+  check('零提前结束记录业主调整时段系统自动通过', applyOwner2.status === 'auto_approved', applyOwner2);
+
+  // --- 7.5 业主选择等待：共享实际未中断，车主停满原窗口全额计费、无补偿、不记提前结束次数 ---
+  const reserveR6 = await api('POST', '/reservations', driver1.token, {
+    spot_id: publishedR.R6.id, vehicle_id: neCar.id, start_at: at(0), end_at: at(120),
+  });
+  await api('POST', '/operations/gate/admit', prop.token, {
+    reservation_id: reserveR6.id, plate: neCar.plate, gate: '南门入口', mode: 'auto', entry_at: at(0),
+  });
+  await api('POST', `/operations/reservations/${reserveR6.id}/parked`, driver1.token, {
+    actual_spot_code: rcodes.R6, parked_at: at(5),
+  });
+  const retR6 = await api('POST', '/dispatch/owner-return', owner.token, {
+    spot_id: publishedR.R6.id, eta_minutes: 20, occurred_at: at(40),
+  });
+  check('等待场景：平台同样给出在场评估与候选方案', retR6.assessment.car_on_site === true && retR6.can_replace === true);
+  await api('POST', `/dispatch/owner-records/${retR6.record.id}/decision`, owner.token, { action: 'owner_wait' });
+  const stR6 = await api('POST', `/reservations/${reserveR6.id}/exit`, driver1.token, { exit_at: at(120) });
+  check('业主等待：车主停满原窗口（停放5分→120分=115分钟）全额计费', stR6.duration_minutes === 115 && Number(stR6.basefee ?? stR6.base_fee) >= 9, stR6);
+  check('业主等待：无任何违约/换位补偿、不扣信用', Number(stR6.abnormal_compensation) === 0 && stR6.credit_delta === 0, stR6);
+  check('业主等待：流水借贷平衡', ledgerBalanced(stR6.ledger));
+  const recordsAfterWait = await api('GET', '/dispatch/owner-records', owner.token);
+  check('选择等待计入发布记录但不计入90天提前结束风控次数（仍为4次）',
+    recordsAfterWait.summary.total === 5 && recordsAfterWait.summary.last_90d === 4, recordsAfterWait.summary);
+
+  console.log('== 8. 共同追溯：分账流水、调度总览、单订单全链路事件、巡查档案 ==');
   const ledger = await api('GET', '/ledger', prop.token);
   check(
     '分账流水覆盖车主/业主/物业/平台/券池/托管账户',

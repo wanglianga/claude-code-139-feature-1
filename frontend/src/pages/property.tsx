@@ -8,9 +8,10 @@ import { AppealDetailModal, ReservationDetailModal } from './shared';
 
 type Session = any;
 const NAV = [
-  { key: 'review', label: '车位审核', icon: '✅' },
+  { key: 'review', label: '车位/时段审核', icon: '✅' },
   { key: 'gate', label: '道闸操作台', icon: '🚧' },
   { key: 'dispatch', label: '夜间调度看板', icon: '🌙' },
+  { key: 'coordination', label: '业主回家协调', icon: '🤝' },
   { key: 'patrol', label: '巡查登记', icon: '🔦' },
   { key: 'appeals', label: '申诉裁决', icon: '⚖️' },
   { key: 'orders', label: '订单追溯', icon: '🧾' },
@@ -23,6 +24,7 @@ export function PropertyWorkspace({ session }: { session: Session }) {
       {tab === 'review' && <ReviewTab />}
       {tab === 'gate' && <GateTab />}
       {tab === 'dispatch' && <DispatchTab />}
+      {tab === 'coordination' && <CoordinationTab />}
       {tab === 'patrol' && <PatrolTab />}
       {tab === 'appeals' && <AppealsTab />}
       {tab === 'orders' && <OrdersTab />}
@@ -39,9 +41,10 @@ function PageHead({ title, desc, right }: any) {
   );
 }
 
-// ---------- 车位审核 ----------
+// ---------- 车位与开放时段审核 ----------
 function ReviewTab() {
   const { data: pending, reload } = useLoader<any[]>('/spots/review/pending');
+  const { data: windowReviews, reload: reloadWindows } = useLoader<any[]>('/spots/share-windows/pending');
   const [remark, setRemark] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState('');
 
@@ -53,10 +56,10 @@ function ReviewTab() {
 
   return (
     <div>
-      <PageHead title="车位发布审核" desc="核验业主车位产权证明、充电桩位置与共享时段，通过后车主方可预约" />
+      <PageHead title="车位发布与开放时段审核" desc="核验产权材料；对有多次提前结束记录业主追加的开放时段需谨慎审核，可通过/限制缩短/驳回" />
       {msg && <div className="alert ok">{msg}</div>}
       <div className="card">
-        <h3>待审核队列 <span className="hint">{pending?.length ?? 0} 个</span></h3>
+        <h3>待审核车位 <span className="hint">{pending?.length ?? 0} 个</span></h3>
         {(pending ?? []).length === 0 && <div className="empty">没有待审核车位</div>}
         {(pending ?? []).map((s) => (
           <div className="ticket-card open" key={s.id}>
@@ -78,6 +81,156 @@ function ReviewTab() {
               <button className="btn success sm" onClick={() => review(s, true)}>通过</button>
               <button className="btn danger sm" onClick={() => review(s, false)}>驳回</button>
             </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <h3>开放时段谨慎审核 <span className="hint">{windowReviews?.length ?? 0} 单（按风险排序）</span></h3>
+        {(windowReviews ?? []).length === 0 && <div className="empty">没有待审核的开放时段申请</div>}
+        {(windowReviews ?? []).map((w) => (
+          <ShareWindowReviewCard key={w.id} w={w} onDone={() => { setMsg(`开放时段审核单 ${w.code} 已处置`); reloadWindows(); }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ShareWindowReviewCard({ w, onDone }: { w: any; onDone: () => void }) {
+  const [note, setNote] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [restrict, setRestrict] = useState(false);
+  const [windows, setWindows] = useState<any[]>(w.windows ?? []);
+  const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
+
+  const submit = async (decision: 'approved' | 'restricted' | 'rejected') => {
+    setErr(''); setBusy(true);
+    try {
+      await api('POST', `/spots/share-windows/${w.id}/handle`, {
+        decision,
+        note: note || undefined,
+        windows: decision === 'restricted' ? windows : undefined,
+      });
+      onDone();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const patch = (i: number, k: string, v: string) => setWindows((ws) => ws.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+
+  return (
+    <div className="ticket-card open" style={{ marginBottom: 12 }}>
+      <div className="ticket-head">
+        <span className="ticket-title">{w.community_name} · {w.spot_code} 开放时段申请</span>
+        <span className="btn-row">
+          <Tag cls={w.risk_level === 'high' ? 'red' : 'amber'} label={`${w.risk_level === 'high' ? '高' : '中'}风险`} />
+          <span className="small muted">{w.owner_name} · 信用 {w.owner_credit_score} · 90天内提前结束 {w.early_termination_count} 次</span>
+        </span>
+      </div>
+      <div className="small" style={{ margin: '6px 0' }}>
+        申请时段：
+        {(w.windows ?? []).map((x: any, i: number) =>
+          <Tag key={i} cls="gray" label={`周${WEEK[x.weekday]} ${String(x.start_time).slice(0, 5)}-${String(x.end_time).slice(0, 5)}`} />)}
+      </div>
+      {w.reason && <div className="small muted">业主说明：{w.reason}</div>}
+      {err && <div className="alert error">{err}</div>}
+      {restrict && (
+        <div className="grid" style={{ gap: 6, margin: '8px 0' }}>
+          {windows.map((x: any, i: number) => (
+            <div key={i} className="btn-row" style={{ alignItems: 'center' }}>
+              <span style={{ width: 60 }}>周{WEEK[x.weekday]}</span>
+              <input type="time" style={{ width: 110 }} value={String(x.start_time).slice(0, 5)} onChange={(e) => patch(i, 'start_time', e.target.value)} />
+              <span className="muted">至</span>
+              <input type="time" style={{ width: 110 }} value={String(x.end_time).slice(0, 5)} onChange={(e) => patch(i, 'end_time', e.target.value)} />
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="btn-row" style={{ marginTop: 8 }}>
+        <input style={{ maxWidth: 320 }} placeholder="审核备注（结合提前结束记录）" value={note} onChange={(e) => setNote(e.target.value)} />
+        <button className="btn success sm" disabled={busy} onClick={() => submit('approved')}>按申请通过</button>
+        <button className="btn sm ghost" disabled={busy} onClick={() => setRestrict(true)}>限制（缩短时段）</button>
+        {restrict && <button className="btn sm" disabled={busy} onClick={() => submit('restricted')}>确认限制生效</button>}
+        <button className="btn danger sm" disabled={busy} onClick={() => submit('rejected')}>驳回（不生效）</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- 业主回家物业协调 ----------
+function CoordinationTab() {
+  const [status, setStatus] = useState('');
+  const { data: list, reload } = useLoader<any[]>(`/dispatch/coordinations${status ? `?status=${status}` : ''}`);
+  const { data: spots } = useLoader<any[]>('/spots');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const [target, setTarget] = useState<Record<string, number>>({});
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const handle = async (cr: any, action: 'relocated' | 'failed') => {
+    setErr('');
+    const note = prompt(action === 'relocated' ? '协调处置说明' : '协调失败原因', action === 'relocated' ? '已电话联系车主，协调至附近空车位' : '周边时段无可用替代车位') ?? undefined;
+    if (note === undefined) return;
+    setBusyId(cr.id);
+    try {
+      await api('POST', `/dispatch/coordinations/${cr.id}/handle`, {
+        action,
+        spot_id: action === 'relocated' ? target[cr.id] : undefined,
+        note,
+      });
+      setMsg(`协调请求 ${cr.code} 已处置：${action === 'relocated' ? '车主已换位' : '退回业主选择等待或违约补偿'}`);
+      reload();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div>
+      <PageHead title="业主提前回家 · 物业协调" desc="业主无法通过平台自动匹配替代车位时发起协调：值班员线下安排临时车位并代车主确认换位，或协调失败退回业主选择" />
+      {msg && <div className="alert ok">{msg}</div>}
+      {err && <div className="alert error">{err}</div>}
+      <div className="filter-bar card" style={{ marginBottom: 12 }}>
+        {[['', '全部'], ['pending', '待协调'], ['coordinating', '协调中'], ['relocated', '已换位'], ['failed', '协调失败']].map(([v, l]) => (
+          <button key={v} className={`btn sm ${status === v ? '' : 'gray'}`} onClick={() => setStatus(v)}>{l}</button>
+        ))}
+      </div>
+      <div className="card">
+        {(list ?? []).length === 0 && <div className="empty">当前没有协调请求</div>}
+        {(list ?? []).map((cr) => (
+          <div key={cr.id} className={`ticket-card ${cr.status === 'failed' ? 'resolved' : 'open'}`} style={{ marginBottom: 12 }}>
+            <div className="ticket-head">
+              <span className="ticket-title">{cr.code} · {cr.community_name} {cr.spot_code}</span>
+              <span className="btn-row">
+                <Tag cls={cr.risk_level === 'high' ? 'red' : cr.risk_level === 'medium' ? 'amber' : 'green'} label={`${cr.risk_level}风险`} />
+                <Tag status={cr.status} />
+              </span>
+            </div>
+            <div className="ticket-desc">
+              提前结束记录 {cr.record_code} · 车主订单 {cr.reservation_code ?? '（未入场）'} {cr.plate ?? ''}
+              {cr.note ? ` · 业主说明：${cr.note}` : ''}
+              <div className="small muted">该业主 90 天内已提前结束 {cr.early_termination_count} 次</div>
+            </div>
+            {['pending', 'coordinating'].includes(cr.status) && (
+              <div className="btn-row" style={{ marginTop: 8 }}>
+                <select value={target[cr.id] ?? ''} onChange={(e) => setTarget((t) => ({ ...t, [cr.id]: Number(e.target.value) }))}>
+                  <option value="">选择协调替代车位…</option>
+                  {(spots ?? []).filter((s: any) => s.id !== cr.spot_id).map((s: any) => (
+                    <option key={s.id} value={s.id}>{s.code} · {s.location_desc}{s.near_charger ? ' ·⚡' : ''}</option>
+                  ))}
+                </select>
+                <button className="btn success sm" disabled={busyId === cr.id || !target[cr.id]} onClick={() => handle(cr, 'relocated')}>
+                  {busyId === cr.id ? '处置中…' : '协调成功 · 代车主确认换位'}
+                </button>
+                <button className="btn danger sm" disabled={busyId === cr.id} onClick={() => handle(cr, 'failed')}>协调失败 · 退回业主</button>
+              </div>
+            )}
+            {cr.result && <div className="small" style={{ marginTop: 6 }}>处置结果：{cr.result}{cr.handled_name ? `（${cr.handled_name}）` : ''}</div>}
           </div>
         ))}
       </div>

@@ -139,4 +139,30 @@ describe('settlePrice', () => {
       expect(Math.abs(debit - credit)).toBeLessThanOrEqual(0.05);
     }
   });
+
+  test('业主提前回家且成功换位：按实际时长计费 + ¥15 换位费用补偿（低于违约补偿），流水仍平衡', () => {
+    const r = settlePrice({
+      ...baseInput,
+      chargeKwh: 0,
+      overnightCap: null,
+      incidents: [{ type: 'owner_return', started_at: new Date('2026-10-01T22:00:00Z') }],
+      ruling: 'owner_fault',
+      relocationCompensation: 15,
+      actualExit: new Date('2026-10-01T22:00:00Z'),
+      prepaid: 45,
+    });
+    expect(r.durationMinutes).toBe(180);
+    expect(r.baseFee).toBe(15);
+    expect(r.abnormalCompensation).toBe(15);
+    // 应付 = 15 - 15 = 0；退款 = 45 - 0 = 45
+    expect(r.payable).toBe(0);
+    expect(r.refund).toBe(45);
+    // 换位补偿仍记业主责任，信用 -5 不变
+    expect(r.creditTarget).toBe('owner');
+    expect(r.creditDelta).toBe(-5);
+    const debit = r.ledger.filter((l) => l.direction === 'debit').reduce((a, b) => a + b.amount, 0);
+    const credit = r.ledger.filter((l) => l.direction === 'credit').reduce((a, b) => a + b.amount, 0);
+    expect(Math.abs(debit - credit)).toBeLessThanOrEqual(0.05);
+    expect(r.notes.some((n) => n.includes('换位'))).toBe(true);
+  });
 });

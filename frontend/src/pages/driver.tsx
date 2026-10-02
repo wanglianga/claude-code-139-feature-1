@@ -11,6 +11,7 @@ type Session = any;
 const NAV = [
   { key: 'browse', label: '找车位预约', icon: '🔍' },
   { key: 'active', label: '我的停车服务', icon: '🚗' },
+  { key: 'relocations', label: '换位协调', icon: '🔁' },
   { key: 'vehicles', label: '车辆与优惠券', icon: '🎫' },
   { key: 'appeals', label: '错停申诉', icon: '⚖️' },
 ];
@@ -21,6 +22,7 @@ export function DriverWorkspace({ session }: { session: Session }) {
     <WorkspaceShell session={session} nav={NAV} active={tab} onNav={setTab}>
       {tab === 'browse' && <BrowseTab />}
       {tab === 'active' && <OrdersTab />}
+      {tab === 'relocations' && <RelocationsTab />}
       {tab === 'vehicles' && <VehiclesTab />}
       {tab === 'appeals' && <AppealsTab />}
     </WorkspaceShell>
@@ -431,6 +433,138 @@ function VehiclesTab() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------- 换位协调（业主提前回家）----------
+function RelocationsTab() {
+  const { data, reload } = useLoader<any[]>('/dispatch/my-relocations');
+  const [err, setErr] = useState('');
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [result, setResult] = useState<any>(null);
+  const [openNav, setOpenNav] = useState<any>(null);
+
+  const respond = async (o: any, accept: boolean) => {
+    setErr('');
+    let reason: string | undefined;
+    if (!accept) {
+      reason = prompt('拒绝该换位方案的原因（可留空）') ?? undefined;
+      if (reason === undefined) return;
+    }
+    setBusyId(o.id);
+    try {
+      const r = await api('POST', `/dispatch/relocations/${o.id}/respond`, { accept, reason });
+      if (accept) setResult(r);
+      reload();
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const offered = (data ?? []).filter((o) => o.status === 'offered');
+  const others = (data ?? []).filter((o) => o.status !== 'offered');
+
+  return (
+    <div>
+      <PageHead title="换位协调" desc="业主提前回家时，平台为你匹配附近可替代车位：接受后收到换位导航，原单按实际时长结算，并获得业主支付的费用补偿" />
+      {err && <div className="alert error">{err}</div>}
+
+      {offered.length > 0 && (
+        <div className="card" style={{ borderColor: 'var(--amber)' }}>
+          <h3>待你响应的换位方案（15 分钟内有效）</h3>
+          {offered.map((o) => (
+            <div key={o.id} className="ticket-card notified" style={{ marginBottom: 12 }}>
+              <div className="ticket-head">
+                <span className="ticket-title">
+                  {o.origin_spot_code} ➜ <b>{o.spot_code}</b>（{o.community_name}）
+                </span>
+                <span className="btn-row">
+                  <Tag cls="blue" label={`距原位 ${o.distance_m}m`} />
+                  <Tag cls="green" label={`费用补偿 ${money(o.fee_compensation)}`} />
+                </span>
+              </div>
+              <div className="ticket-desc">
+                业主临时回家提前收回 {o.origin_spot_code}；{o.location_desc ? `新车位位置：${o.location_desc}；` : ''}
+                新车位 {o.hourly_rate} 元/时{o.near_charger ? ' · ⚡ 带充电桩' : ''}，
+                平台另发换位补差券（预估 {money(o.topup_fee_estimate)}，按新车位剩余窗口计费、夜间封顶）。
+              </div>
+              <div className="small muted">方案 {o.offer_code} · 关联订单 {o.reservation_code} · {o.plate}</div>
+              {o.navigation && (
+                <div className="nav-steps" style={{ marginTop: 8 }}>
+                  <b>🧭 {o.navigation.voice}</b>
+                  <ol>{o.navigation.steps.map((s: string, i: number) => <li key={i}>{s}</li>)}</ol>
+                  <div className="small muted">地库无信号时可使用离线导航码：<b className="mono">{o.navigation.offline_code}</b></div>
+                </div>
+              )}
+              <div className="btn-row" style={{ marginTop: 8 }}>
+                <button className="btn success" disabled={busyId === o.id} onClick={() => respond(o, true)}>
+                  {busyId === o.id ? '处理中…' : '接受换位，按导航挪车'}
+                </button>
+                <button className="btn gray" disabled={busyId === o.id} onClick={() => respond(o, false)}>拒绝方案</button>
+                <button className="btn sm ghost" onClick={() => setOpenNav(o)}>查看完整导航</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {offered.length === 0 && <div className="alert info">当前没有待响应的换位方案。业主回家后匹配结果会推送到这里。</div>}
+
+      {others.length > 0 && (
+        <div className="card">
+          <h3>历史换位方案</h3>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>方案</th><th>原车位 ➜ 替代车位</th><th>状态</th><th>新预约</th><th>费用补偿</th></tr></thead>
+              <tbody>
+                {others.map((o) => (
+                  <tr key={o.id}>
+                    <td className="mono small">{o.offer_code}<div className="small muted">{dt(o.created_at)}</div></td>
+                    <td>{o.origin_spot_code} ➜ {o.spot_code}</td>
+                    <td><Tag status={o.status} /></td>
+                    <td className="mono small">{o.new_reservation_code ?? '—'}</td>
+                    <td className="money">{o.status === 'accepted' ? money(o.fee_compensation) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {openNav && (
+        <div className="modal-mask" onMouseDown={(e) => e.target === e.currentTarget && setOpenNav(null)}>
+          <div className="modal">
+            <div className="modal-head"><h3>换位导航 · {openNav.origin_spot_code} ➜ {openNav.spot_code}</h3><button className="close-x" onClick={() => setOpenNav(null)}>×</button></div>
+            <div className="modal-body">
+              <div className="nav-steps">
+                <b>{openNav.navigation.voice}</b>
+                <ol>{openNav.navigation.steps.map((s: string, i: number) => <li key={i}>{s}</li>)}</ol>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <div className="modal-mask" onMouseDown={(e) => e.target === e.currentTarget && setResult(null)}>
+          <div className="modal wide">
+            <div className="modal-head"><h3>✅ 换位成功</h3><button className="close-x" onClick={() => setResult(null)}>×</button></div>
+            <div className="modal-body">
+              <div className="alert ok">
+                已为你生成新预约 <b>{result.new_reservation.code}</b>（车位 <b>{result.navigation?.target_spot}</b>），入场状态已延续；
+                原单按实际可用时长结算，业主支付的 {money(result.origin_settlement?.abnormal_compensation)} 费用补偿已随退款发放，
+                另到账换位补差券 {money(result.topup_coupon)}（已自动抵扣新预约）。
+              </div>
+              <h3>原车位订单清算单</h3>
+              {result.origin_settlement && <SettlementView s={result.origin_settlement} />}
+              <div className="modal-foot"><button className="btn" onClick={() => setResult(null)}>知道了</button></div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
